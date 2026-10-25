@@ -4,10 +4,106 @@
 <link rel="icon" href="icons/lugaru-icon.ico" type="image/x-icon">
 <meta charset="utf-8">
 <title>Lugaru</title>
+<style>
+  #boot{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;background:#000;color:#d8d0c4;font:15px/1.5 system-ui,sans-serif;text-align:center;padding:24px;z-index:10}
+  #boot h1{margin:0;font:600 30px Georgia,serif;letter-spacing:.12em;color:#e4572e}
+  #boot .bar{width:min(420px,80vw);height:6px;background:#222;border-radius:3px;overflow:hidden}
+  #boot .bar i{display:block;height:100%;width:0;background:#e4572e;transition:width .2s}
+  #boot .msg{max-width:620px;white-space:pre-line}
+  #boot.err .bar{display:none}
+  #boot.err .msg{color:#ff8a7a}
+  #boot button{display:none;font:inherit;padding:8px 18px;border:1px solid #e4572e;background:#1a0d08;color:#fff;border-radius:4px;cursor:pointer}
+  #boot.err button{display:inline-block}
+</style>
 </head>
 <body style="margin:0;background:#000">
 <canvas id="canvas" tabindex="-1" style="width:100vw;height:100vh;display:block" oncontextmenu="event.preventDefault()"></canvas>
+<div id="boot"><h1>LUGARU</h1><div class="bar"><i></i></div><div class="msg">Loading…</div>
+  <button onclick="location.reload()">Reload</button></div>
+<noscript><p style="color:#fff;font:16px sans-serif;text-align:center">Lugaru needs JavaScript enabled.</p></noscript>
 <script>
+  // ------------------------------------------------------------------
+  // Loading screen + visible errors.
+  //
+  // Without this the page is a plain black canvas while ~42 MB of game data
+  // downloads, and it stays black forever if anything fails (no WebGL, a
+  // network error, or a WASM abort), with the reason only in the console.
+  // ------------------------------------------------------------------
+  var boot = (function () {
+    var el = document.getElementById('boot');
+    var bar = el.querySelector('.bar i'), msg = el.querySelector('.msg');
+    var failed = false, done = false;
+    return {
+      status: function (text, frac) {
+        if (failed || done) return;
+        if (text) msg.textContent = text;
+        if (frac != null) bar.style.width = Math.max(0, Math.min(100, frac * 100)) + '%';
+      },
+      fail: function (text) {
+        if (failed) return;
+        failed = true;
+        el.style.display = 'flex';
+        el.className = 'err';
+        msg.textContent = text;
+      },
+      hide: function () {
+        if (failed || done) return;
+        done = true;
+        el.style.display = 'none';
+      },
+      get failed() { return failed; }
+    };
+  })();
+
+  function explain(reason) {
+    var s = String(reason && (reason.message || reason) || 'unknown error');
+    if (/LinkError|function import requires a callable|import object field/i.test(s)) {
+      return 'The game files in your browser cache are from an older version of the site.\n' +
+             'Reload the page to fetch the current version.\n\n(' + s + ')';
+    }
+    if (/out of memory|Cannot enlarge memory|RangeError: (WebAssembly|Array buffer)/i.test(s)) {
+      return 'The browser ran out of memory while starting the game. Close other tabs and reload.\n\n(' + s + ')';
+    }
+    return 'Lugaru failed to start.\n\n' + s;
+  }
+
+  // Fail early, with a useful message, when WebGL is not available at all.
+  (function () {
+    var probe = document.createElement('canvas');
+    var gl = null;
+    try { gl = probe.getContext('webgl') || probe.getContext('experimental-webgl'); } catch (e) {}
+    if (!gl) {
+      boot.fail('Your browser could not create a WebGL context, which Lugaru needs.\n\n' +
+                'Turn on hardware acceleration (Chrome: Settings > System; Firefox: Settings > Performance),\n' +
+                'update your graphics driver, then reload. chrome://gpu or about:support shows why WebGL is off.');
+    } else {
+      var lose = gl.getExtension('WEBGL_lose_context');
+      if (lose) lose.loseContext();   // free the probe context right away
+    }
+  })();
+
+  window.addEventListener('error', function (e) {
+    if (e && e.target && (e.target.tagName === 'SCRIPT')) boot.fail('Could not load ' + e.target.src + '. Check your connection and reload.');
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    // Pointer-lock rejections are handled below; only treat startup failures as fatal.
+    if (r && /Aborted|LinkError|CompileError|RuntimeError|Network Error|\d{3}: http/i.test(String(r.message || r))) boot.fail(explain(r));
+  });
+  document.getElementById('canvas').addEventListener('webglcontextlost', function (e) {
+    boot.fail('The graphics context was lost (GPU reset or driver problem). Reload the page to continue.');
+  });
+
+  // Hide the loading screen when the game draws its first frame (not merely
+  // when the runtime starts: loading textures takes a few more seconds).
+  (function () {
+    var P = WebGLRenderingContext.prototype, de = P.drawElements, da = P.drawArrays;
+    function first() { P.drawElements = de; P.drawArrays = da; setTimeout(boot.hide, 50); }
+    P.drawElements = function () { first(); return de.apply(this, arguments); };
+    P.drawArrays = function () { first(); return da.apply(this, arguments); };
+  })();
+
   // Missing helper in Emscripten's GL emulation (release builds)
   var warnOnce = (function () {
     var seen = {};
@@ -18,6 +114,17 @@
     canvas: document.getElementById('canvas'),
     print: function (t) { console.log(t); },
     printErr: function (t) { console.error(t); },
+    setStatus: function (text) {
+      // Emscripten reports "Downloading data... (loaded/total)" here.
+      var m = /\((\d+)\/(\d+)\)/.exec(text || '');
+      if (m) {
+        var mb = function (n) { return (n / 1048576).toFixed(1); };
+        boot.status('Downloading game data… ' + mb(+m[1]) + ' / ' + mb(+m[2]) + ' MB', +m[1] / +m[2]);
+      } else if (text) {
+        boot.status(text === 'Running...' ? 'Starting…' : text, text === 'Running...' ? 1 : null);
+      }
+    },
+    onAbort: function (what) { boot.fail(explain(what)); },
     preRun: [function () {
       // Create the folder Lugaru saves its config and accounts in
       var path = 'home/web_user/.config/lugaru';
@@ -114,7 +221,41 @@
       }
     }
   })();
+
+  // ------------------------------------------------------------------
+  // Never mix files from two deployments.
+  //
+  // GitHub Pages serves everything with "Cache-Control: max-age=600", so for
+  // ten minutes after a new build is published a browser can combine a cached
+  // lugaru.js with a fresh lugaru.wasm (or the reverse). The wasm imports no
+  // longer match the JS glue, instantiation fails with a LinkError and the
+  // page stays black. Revalidate the three game files on every visit: an
+  // unchanged file costs one conditional request (304), a changed one is
+  // fetched fresh.
+  // ------------------------------------------------------------------
+  (function () {
+    var GAME_FILES = /(^|\/)lugaru\.(js|wasm|data)(\?|$)/;
+    var nativeFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (GAME_FILES.test(url)) {
+        init = Object.assign({}, init, { cache: 'no-cache' });
+      }
+      return nativeFetch(input, init);
+    };
+    function start(version) {
+      var s = document.createElement('script');
+      // The version tag makes the script URL change whenever the file does,
+      // so the <script> load cannot be served an older cached copy.
+      s.src = 'lugaru.js' + (version ? '?v=' + encodeURIComponent(version) : '');
+      s.async = false;
+      document.body.appendChild(s);
+    }
+    window.fetch('lugaru.js', { method: 'HEAD' }).then(function (r) {
+      var v = r.ok && (r.headers.get('ETag') || r.headers.get('Last-Modified'));
+      start(v ? v.replace(/[^\w.-]/g, '') : String(Date.now()));
+    }, function () { start(''); });
+  })();
 </script>
-<script src="lugaru.js"></script>
 </body>
 </html>
