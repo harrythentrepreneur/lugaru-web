@@ -1,0 +1,28 @@
+# This is pretty useless, but it sets the version of the build
+version: 0.0.0.build.{build}
+
+# Force configuration
+configuration: Debug
+
+# Use Visual Studio 2015 base image
+image: Visual Studio 2015
+
+# enforce the location, since we want predictable cmake things
+clone_folder: c:\projects\osslugaru\lugaru
+
+# Build for 32-bit and 64-bit
+platform:
+  - Win32
+  - Win64
+
+# Prep work (CMake VS project generation)
+before_build:
+  - cd c:\projects\osslugaru\lugaru
+  - set PATH=C:\Program Files (x86)\MSBuild\14.0\BIN;%PATH%
+  - if %PLATFORM% == Win32 cmake . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=C:\projects\osslugaru\lugaru\msvc32-build
+  - if %PLATFORM% == Win64 cmake . -G "Visual Studio 14 2015 Win64" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=C:\projects\osslugaru\lugaru\msvc64-build
+
+# Tell it what to build
+build:
+  project: lugaru.sln
+  parallel: true
